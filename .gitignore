@@ -10,6 +10,9 @@ data/
 *.csv
 exports/
 cgm_raw/
+# 例外：可公開的範例種子檔（非個人資料）
+!n8n/personal_food_table.sample.csv
+!examples/**/*.csv
 
 # 作業系統與編輯器
 .DS_Store
