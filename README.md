@@ -24,8 +24,9 @@
 - [10. 參考資料庫](#10-參考資料庫)
 - [11. 4 週落地時程與驗收](#11-4-週落地時程與驗收)
 - [12. v1 明確不做](#12-v1-明確不做)
-- [13. 待拍板決策](#13-待拍板決策)
-- [14. 免責聲明](#14-免責聲明)
+- [13. 選型決策（已定案）](#13-選型決策已定案)
+- [14. Repo 結構與執行](#14-repo-結構與執行)
+- [15. 免責聲明](#15-免責聲明)
 
 ---
 
@@ -34,9 +35,9 @@
 整體五層拆解（輸入 → 運算 → 儲存 → 分析 → 輸出）正確，與實務上 CGM×飲食研究的資料管線一致
 （Weizmann 個人化營養研究、Zoe、Levels 同一骨架）。方案一在此骨架上做三件事收斂：
 
-1. **前門改用 LINE 官方帳號**：一則訊息同時帶影像與備註，`T0`（用餐時間錨點）由 webhook 伺服器時間決定，不依賴 EXIF。
-2. **運算層先不接影像 SDK 鏈**：多模態 LLM 直接吃原圖，數字用「個人常吃食物表」覆蓋高頻品項；完整營養資料庫 RAG 推遲到 v2。
-3. **分析層集中為單一 Python 腳本**：每個指標都有寫死的臨床定義與排除規則，易被醫師 code review、易加單元測試。
+1. **前門用 LINE 官方帳號**：一則訊息同時帶影像與備註，`T0`（用餐時間錨點）由 webhook 伺服器時間決定，不依賴 EXIF。
+2. **運算層用 Gemini，先不接影像 SDK 鏈**：多模態 LLM 直接吃原圖並以 `responseSchema` 強制結構化輸出，數字用「個人常吃食物表」覆蓋高頻品項；完整營養資料庫 RAG 推遲到 v2。
+3. **分析層集中為單一 Python 套件**：每個指標都有寫死的臨床定義與排除規則，易被醫師 code review、易加單元測試。
 
 原藍圖的 4 個缺口，方案一的處理：
 
@@ -316,17 +317,62 @@ v1 從嚴，寧缺勿濫 —— 乾淨的少數資料點勝過有雜訊的排行
 
 ---
 
-## 13. 待拍板決策
+## 13. 選型決策（已定案）
 
-| 決策 | 建議 | 替代 |
+| 決策 | 選定 | 理由 |
 |------|------|------|
-| 拍照前門 | **LINE 官方帳號**（台灣體驗最好、`T0` 最可靠） | 純 Google Drive 資料夾監看（少一個平台，但備註與確認流程較弱） |
-| 多模態模型 | **Gemini 2.x**（原生多模態、成本低、與 Drive／Sheets 同生態） | GPT-4o 或 Claude（辨識力相近，看既有帳號與預算） |
-| CGM 裝置 | **Abbott FreeStyle Libre**（台灣普及、CSV 匯出穩定） | Dexcom（有官方 API，利於 v2 自動化，裝置成本較高） |
+| 拍照前門 | **LINE 官方帳號**（Messaging API webhook） | 台灣體驗最好；一則訊息帶影像＋備註；`T0` 用伺服器收訊時間，不依賴 EXIF |
+| 多模態模型 | **Google Gemini**（`gemini-2.5-flash`，可由 `GEMINI_MODEL` 覆寫） | 原生多模態、支援 `responseSchema` 結構化輸出、成本低、與 Drive／Sheets 同生態 |
+| CGM 裝置 | **Abbott FreeStyle Libre**（LibreView CSV 匯出） | 台灣普及；v1 走每週手動匯出，免處理非官方 API 的法遵與破 API 風險 |
+
+v2 再評估：Dexcom 官方 API 自動拉取、ML Kit 影像鏈、營養資料庫 RAG。
 
 ---
 
-## 14. 免責聲明
+## 14. Repo 結構與執行
+
+```
+Ai-to-Agent-CGM-v2/
+├── README.md                     本文件（完整說明與架構）
+├── LICENSE                       CC BY-SA 4.0
+├── docs/
+│   └── architecture-deck.html    五層架構總覽簡報（12 頁）
+├── n8n/
+│   ├── cgm-coach.workflow.json   可匯入的 n8n 工作流（LINE→Gemini→Sheets + CGM CSV）
+│   └── README.md                 憑證、環境變數、節點說明、TODO
+└── engine/
+    ├── requirements.txt
+    ├── config.example.yaml
+    ├── README.md                 安裝與使用
+    ├── cgm_coach/
+    │   ├── align.py              ✅ T0 對齊、5 指標、排除規則（核心）
+    │   ├── flexibility.py        ✅ CGM 共識指標面板、低血糖事件
+    │   ├── report.py             🟡 Markdown 週報（可用）＋疊圖（待補）
+    │   ├── libre.py              🟡 LibreView CSV 解析（骨架）
+    │   ├── sheets.py             🟡 Google Sheets 讀寫（骨架）
+    │   ├── config.py / cli.py    設定與進入點
+    │   └── __main__.py
+    └── tests/test_align.py       合成血糖曲線驗證指標與旗標
+```
+
+**n8n：** 匯入 `n8n/cgm-coach.workflow.json`，依 `n8n/README.md` 設定 2 個 Google 憑證與 6 個環境變數，LINE webhook 指向 `/webhook/line-webhook`。
+
+**Python 引擎：**
+
+```bash
+cd engine
+pip install -r requirements.txt
+cp config.example.yaml config.yaml          # 填 sheet_id、服務帳號金鑰路徑
+python -m pytest -q                          # 4 項測試
+python -m cgm_coach import-libre <LibreView匯出.csv>
+python -m cgm_coach weekly-report --since 2026-08-25 --until 2026-09-01
+```
+
+目前 `align.py` 與 `flexibility.py` 已完整實作並通過測試；`libre.py` / `sheets.py` / `report.plot_overlays` 為骨架，TODO 見各自 README。
+
+---
+
+## 15. 免責聲明
 
 本專案為個人飲食型態的觀察工具，**非醫療器材、不提供醫療診斷或個人化醫療建議**。
 所有輸出僅供了解自身飲食與血糖變化的趨勢參考。任何用藥、胰島素劑量或飲食療法調整，

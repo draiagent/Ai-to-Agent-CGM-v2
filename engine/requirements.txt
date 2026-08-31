@@ -1,0 +1,9 @@
+pandas>=2.1
+numpy>=1.26
+matplotlib>=3.8
+pyyaml>=6.0
+python-dateutil>=2.9
+gspread>=6.0
+google-auth>=2.30
+# 開發
+pytest>=8.0

@@ -1,0 +1,12 @@
+# 複製為 config.yaml 後填入（config.yaml 已被 .gitignore 排除）
+sheet_id: "在此填入 Google Sheets 試算表 ID"
+service_account_json: "./service-account.json"   # 服務帳號金鑰，不進版控
+tz: "Asia/Taipei"
+report_out_dir: "./out"
+libre_dayfirst: false        # 歐系 LibreView 帳號（DD-MM-YYYY）設 true
+
+# 指標參數覆寫（留空用 align.py 預設；見 ../README.md §5/§6）
+overrides:
+  # postprandial_min: 180
+  # recovery_threshold_mgdl: 10
+  # min_clean_exposures: 3
