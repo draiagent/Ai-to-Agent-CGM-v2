@@ -1,0 +1,28 @@
+# 環境與密鑰
+.env
+.env.*
+*.key
+credentials*.json
+service-account*.json
+
+# 個人健康資料（絕不進版控）
+data/
+*.csv
+exports/
+cgm_raw/
+
+# 作業系統與編輯器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# n8n
+.n8n/
