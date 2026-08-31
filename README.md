@@ -210,11 +210,13 @@ v1 從嚴，寧缺勿濫 —— 乾淨的少數資料點勝過有雜訊的排行
 | `t0` | ISO8601 (+08:00) | 用餐時間錨點（webhook 伺服器時間） |
 | `note` | text | 使用者語音／文字備註原文 |
 | `items_json` | JSON text | 品項明細（見下方 schema） |
-| `carb_g` / `net_carb_g` / `protein_g` / `fat_g` / `fiber_g` | number | 總量（經個人常吃食物表覆蓋） |
+| `carb_g` / `net_carb_g` / `protein_g` / `fat_g` / `fiber_g` | number | 總量（命中 `personal_food_table` 的品項以其 per-100g 值 × 份量重算） |
 | `gi_est` / `gl_est` | number | 推估值 |
+| `gi_source` | enum | `gemini` / `personal_table`（已知 GI 涵蓋 ≥ 80% 淨碳水時用碳水加權） |
 | `eating_order` | enum | `veg_first` / `carb_first` / `mixed` / `unknown` |
 | `post_meal_activity` | enum | `none` / `walk_10_15min` / `walk_30min+` / `unknown` |
-| `confidence` | number 0–1 | 綜合信心度 |
+| `confidence` | number 0–1 | 綜合信心度（每覆蓋一項略升） |
+| `overridden_items` | int | 被 `personal_food_table` 覆蓋的品項數 |
 | `user_confirmed` | bool | 是否經一鍵校正確認 |
 | `image_url` | text | Drive 歸檔連結 |
 
@@ -237,9 +239,24 @@ v1 從嚴，寧缺勿濫 —— 乾淨的少數資料點勝過有雜訊的排行
 | `hrv` | number | 選填，若有裝置 |
 | `notes` | text | 其他 |
 
-三分頁以時間戳為 join key。n8n 入口一律轉 `Asia/Taipei`；`cgm` 以 `ts` + `sensor_session` 去重。
+**`personal_food_table`（個人常吃食物表，手建）**
 
-### LLM 輸出 JSON schema（示意）
+| 欄位 | 型別 | 說明 |
+|------|------|------|
+| `name` | text | 品項名，比對 Gemini `items[].name`（正規化後完全比對 → 別名 → 包含） |
+| `aliases` | text | 選填，逗號／頓號分隔的別名（例：`白飯,白米飯,steamed rice`） |
+| `carb_per_100g` / `net_carb_per_100g` / `protein_per_100g` / `fat_per_100g` / `fiber_per_100g` | number | 每 100 g 營養素；缺欄則該項沿用 Gemini 估值 |
+| `gi` | number | 選填，該食物已知 GI |
+| `default_portion_g` | number | 選填，Gemini 估不出份量時的預設克數 |
+
+數值以 TFDA／USDA FDC 或包裝營養標示為準，先填高頻品項（30–50 筆），逐步擴充。
+種子檔見 [`n8n/personal_food_table.sample.csv`](n8n/personal_food_table.sample.csv)（**範例值，需自行校正**）。
+
+四分頁以時間戳為 join key（`personal_food_table` 為靜態查表）。n8n 入口一律轉 `Asia/Taipei`；`cgm` 以 `ts` + `sensor_session` 去重。
+
+### `items_json` 形狀（Gemini 估算 → personal_food_table 覆蓋後存入，示意）
+
+> Gemini 原始輸出不含 `source`；該欄由 `Build meals Row` 節點在比對 `personal_food_table` 後標註（`gemini` 或 `personal_table`）。
 
 ```json
 {

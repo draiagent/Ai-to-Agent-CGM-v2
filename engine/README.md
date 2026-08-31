@@ -29,6 +29,7 @@ python -m cgm_coach weekly-report --since 2026-08-25 --until 2026-09-01
 |------|------|------|
 | `cgm_coach/align.py` | ✅ 已實作 | `compute_baseline` / `delta_peak` / `incremental_auc`（Wolever）/ `time_to_recovery` / `exclusion_flags` / `analyze_all` / `food_ranking` |
 | `cgm_coach/flexibility.py` | ✅ 已實作 | `panel`（Mean/GMI/CV%/TIR/TBR/TAR/隔夜）、`safety_events`（低血糖清單） |
+| `cgm_coach/foodtable.py` | ✅ 已實作 | `apply_overrides`：以 `personal_food_table` 覆蓋 Gemini 估算的命中品項，重算 totals 與 GI/GL（與 n8n「Build meals Row」節點同邏輯） |
 | `cgm_coach/report.py` | 🟡 Markdown 可用 | `build_markdown` 完整；`plot_overlays` 待補 matplotlib 疊圖 |
 | `cgm_coach/libre.py` | 🟡 骨架 | LibreView CSV 解析；日期格式 `dayfirst` 需依帳號地區確認 |
 | `cgm_coach/sheets.py` | 🟡 骨架 | gspread 讀寫；`append_cgm` 去重待補 |

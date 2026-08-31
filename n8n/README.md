@@ -33,9 +33,10 @@
 
 先手動建立試算表，三個分頁與標題列（順序需與 `../README.md` §9 一致）：
 
-- `meals`：`meal_id, t0, note, items_json, carb_g, net_carb_g, protein_g, fat_g, fiber_g, gi_est, gl_est, eating_order, post_meal_activity, confidence, user_confirmed, image_url, source_user`
+- `meals`：`meal_id, t0, note, items_json, carb_g, net_carb_g, protein_g, fat_g, fiber_g, gi_est, gl_est, gi_source, eating_order, post_meal_activity, confidence, overridden_items, user_confirmed, image_url, source_user`
 - `cgm`：`ts, glucose_mgdl, sensor_session, source`
 - `context`：`date, sleep_hours, stress_subjective, hrv, notes`
+- `personal_food_table`：`name, aliases, carb_per_100g, net_carb_per_100g, protein_per_100g, fat_per_100g, fiber_per_100g, gi, default_portion_g` — 種子資料見 `personal_food_table.sample.csv`（貼進分頁後**自行校正數值**）
 
 ## 5. 工作流結構
 
@@ -56,7 +57,11 @@ LINE Webhook → Parse LINE Event → Route Event
   ├─ [image] 照片估算
   │     LINE Get Image Content → Archive Image to Drive
   │     → Build Gemini Prompt → Gemini — Estimate Macros
-  │     → Build meals Row → Append meals Row
+  │     → Load Personal Food Table → Aggregate Food Table
+  │     → Build meals Row（比對 personal_food_table：name→aliases→包含；
+  │                        命中則以 per-100g × portion_g 重算該品項，標 source=personal_table；
+  │                        重算 totals；已知 GI 涵蓋 ≥80% 淨碳水時碳水加權算 gi_est）
+  │     → Append meals Row
   │     → LINE Reply — Confirm Card（postback 按鈕：✅ / ✏️減半 / ✏️加倍）
   │     → Respond 200
   │
@@ -75,7 +80,8 @@ CGM CSV — Daily 01:30 → List CGM CSV Files → Download CSV
 
 ## 6. 待補（TODO）
 
-- **個人常吃食物表覆蓋**：`Build meals Row` 節點的 `PERSONAL_TABLE` 目前是空物件。接一個讀 `personal_food_table` 分頁的 Google Sheets 節點，對品項名做碳水覆蓋。
+- **食物表快取**：`Load Personal Food Table` 每張照片都讀一次分頁（多一次 ~0.5s Sheets 呼叫）。量大時改用 n8n 靜態資料或 workflow 變數快取，定時刷新。
+- **模糊比對**：目前是「正規化完全比對 → 別名 → 子字串包含」；混合菜色（如「雞腿便當」）不會命中單一品項。可在 Gemini 提示要求拆解到可查表的品項粒度。
 - **批次 events**：`Parse LINE Event` 只處理 `events[0]`；LINE 可能一次送多筆。
 - **回應時機**：目前在整條流程末端才 `Respond 200`；量大時改為 `Parse LINE Event` 後即回 200、其餘節點非同步處理。
 - **校正找不到列**：`Compute Correction` 已回 `_not_found` 並由 reply 節點提示，但 `Update meals Row` 仍會執行一次無匹配更新；可加 IF 過濾。

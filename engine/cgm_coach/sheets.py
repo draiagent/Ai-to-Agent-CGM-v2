@@ -16,6 +16,7 @@ if TYPE_CHECKING:
 MEALS_SHEET = "meals"
 CGM_SHEET = "cgm"
 CONTEXT_SHEET = "context"
+FOOD_TABLE_SHEET = "personal_food_table"
 
 
 def _client(cfg: "Config"):
@@ -51,6 +52,12 @@ def read_cgm(cfg: "Config") -> pd.DataFrame:
 
 def read_context(cfg: "Config") -> pd.DataFrame:
     return _read_sheet(cfg, CONTEXT_SHEET)
+
+
+def read_personal_food_table(cfg: "Config") -> list[dict]:
+    """個人常吃食物表，回傳 list[dict] 供 foodtable.apply_overrides 使用。"""
+    df = _read_sheet(cfg, FOOD_TABLE_SHEET)
+    return df.to_dict("records")
 
 
 def append_cgm(cfg: "Config", rows: pd.DataFrame) -> int:

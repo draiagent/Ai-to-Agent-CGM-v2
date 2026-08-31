@@ -124,13 +124,37 @@
     },
     {
       "parameters": {
-        "jsCode": "// 解析 Gemini 回應 → 套用個人常吃食物表覆蓋總碳水 → 組 meals 列\nconst p = $('Parse LINE Event').item.json;\nconst resp = $input.first().json;\nlet est = {};\ntry { est = JSON.parse(resp.candidates[0].content.parts[0].text); }\ncatch (e) { est = { items: [], totals: {}, _parse_error: String(e) }; }\n\n// TODO: 讀 Google Sheets 的 personal_food_table，對 est.items[].name 做碳水覆蓋\nconst PERSONAL_TABLE = {};\n\nfunction r1(x) { return x == null ? null : Math.round(x * 10) / 10; }\nconst totals = est.totals || {};\nconst confs = (est.items || []).map(i => i.portion_confidence).filter(x => typeof x === 'number');\nconst confidence = confs.length ? r1(confs.reduce((a, b) => a + b, 0) / confs.length) : 0.4;\n\nreturn [{ json: {\n  meal_id: p.t0,\n  t0: p.t0,\n  note: p.text || '',\n  items_json: JSON.stringify(est.items || []),\n  carb_g: r1(totals.carb_g),\n  net_carb_g: r1(totals.net_carb_g ?? totals.carb_g),\n  protein_g: r1(totals.protein_g),\n  fat_g: r1(totals.fat_g),\n  fiber_g: r1(totals.fiber_g),\n  gi_est: r1(est.gi_est),\n  gl_est: r1(est.gl_est),\n  eating_order: est.eating_order || 'unknown',\n  post_meal_activity: est.post_meal_activity || 'unknown',\n  confidence,\n  user_confirmed: false,\n  image_url: ($('Archive Image to Drive').item.json.webViewLink) || '',\n  source_user: p.source_user\n} }];"
+        "operation": "read",
+        "documentId": { "__rl": true, "mode": "id", "value": "={{ $env.SHEET_ID }}" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "personal_food_table" },
+        "options": {}
+      },
+      "id": "sheets_read_foodtable",
+      "name": "Load Personal Food Table",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [400, -200],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "REPLACE", "name": "Google Sheets account" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 把 personal_food_table 多列收成單一 item，避免下游 per-item 執行多次\nreturn [{ json: { table: $input.all().map(i => i.json) } }];"
+      },
+      "id": "aggregate_foodtable",
+      "name": "Aggregate Food Table",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, -200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 解析 Gemini 回應 → 以 personal_food_table 覆蓋命中品項的營養素 → 重算 totals 與 GI/GL → 組 meals 列\nconst p = $('Parse LINE Event').item.json;\nconst resp = $('Gemini — Estimate Macros').item.json;\nconst table = ($input.first().json.table) || [];\n\nlet est = {};\ntry { est = JSON.parse(resp.candidates[0].content.parts[0].text); }\ncatch (e) { est = { items: [], totals: {}, _parse_error: String(e) }; }\n\nconst num = (x) => { const v = parseFloat(x); return Number.isFinite(v) ? v : null; };\nconst r1 = (x) => x == null ? null : Math.round(x * 10) / 10;\nconst norm = (s) => String(s || '').trim().toLowerCase().replace(/\\s+/g, '');\n\n// 建索引：name 與 aliases（逗號/頓號/分號分隔）\nconst idx = table.map(row => ({\n  keys: [row.name, ...String(row.aliases || '').split(/[,、;；]/)].map(norm).filter(Boolean),\n  row\n}));\nfunction lookup(name) {\n  const n = norm(name);\n  if (!n) return null;\n  for (const e of idx) if (e.keys.includes(n)) return e.row;              // 完全 / 別名\n  for (const e of idx) if (e.keys.some(k => n.includes(k) || k.includes(n))) return e.row;  // 包含\n  return null;\n}\nfunction per100(row, field, g) { const v = num(row[field]); return v == null ? null : r1(v * g / 100); }\n\nconst items = (est.items || []).map(it => {\n  const hit = lookup(it.name);\n  if (!hit) return { ...it, source: 'gemini' };\n  const g = num(it.portion_g) ?? num(hit.default_portion_g) ?? 0;\n  return {\n    ...it,\n    portion_g: g,\n    carb_g:     per100(hit, 'carb_per_100g', g)     ?? it.carb_g,\n    net_carb_g: per100(hit, 'net_carb_per_100g', g) ?? per100(hit, 'carb_per_100g', g) ?? it.net_carb_g,\n    protein_g:  per100(hit, 'protein_per_100g', g)  ?? it.protein_g,\n    fat_g:      per100(hit, 'fat_per_100g', g)      ?? it.fat_g,\n    fiber_g:    per100(hit, 'fiber_per_100g', g)    ?? it.fiber_g,\n    gi_known:   num(hit.gi),\n    source: 'personal_table'\n  };\n});\n\nconst sum = (f) => r1(items.reduce((a, it) => a + (num(it[f]) || 0), 0));\nconst totals = { carb_g: sum('carb_g'), net_carb_g: sum('net_carb_g'), protein_g: sum('protein_g'), fat_g: sum('fat_g'), fiber_g: sum('fiber_g') };\n\n// GI：若已知 GI 的品項涵蓋 >= 80% 淨碳水，用碳水加權；否則沿用 Gemini 估\nconst totalNet = items.reduce((a, it) => a + (num(it.net_carb_g) || 0), 0);\nconst withGI = items.filter(it => num(it.gi_known) != null && (num(it.net_carb_g) || 0) > 0);\nlet gi_est = r1(est.gi_est), gi_source = 'gemini';\nif (withGI.length && totalNet > 0) {\n  const covered = withGI.reduce((a, it) => a + num(it.net_carb_g), 0);\n  if (covered / totalNet >= 0.8) {\n    gi_est = Math.round(withGI.reduce((a, it) => a + num(it.gi_known) * num(it.net_carb_g), 0) / covered);\n    gi_source = 'personal_table';\n  }\n}\nconst gl_est = (gi_est != null && totals.net_carb_g != null) ? Math.round(gi_est * totals.net_carb_g / 100) : r1(est.gl_est);\n\nconst overridden = items.filter(it => it.source === 'personal_table').length;\nconst confs = (est.items || []).map(i => i.portion_confidence).filter(x => typeof x === 'number');\nlet confidence = confs.length ? confs.reduce((a, b) => a + b, 0) / confs.length : 0.4;\nif (overridden && items.length) confidence = Math.min(0.95, confidence + 0.15 * overridden / items.length);\n\nreturn [{ json: {\n  meal_id: p.t0,\n  t0: p.t0,\n  note: p.text || '',\n  items_json: JSON.stringify(items),\n  carb_g: totals.carb_g,\n  net_carb_g: totals.net_carb_g,\n  protein_g: totals.protein_g,\n  fat_g: totals.fat_g,\n  fiber_g: totals.fiber_g,\n  gi_est,\n  gl_est,\n  gi_source,\n  eating_order: est.eating_order || 'unknown',\n  post_meal_activity: est.post_meal_activity || 'unknown',\n  confidence: Math.round(confidence * 100) / 100,\n  overridden_items: overridden,\n  user_confirmed: false,\n  image_url: ($('Archive Image to Drive').item.json.webViewLink) || '',\n  source_user: p.source_user\n} }];"
       },
       "id": "build_row",
       "name": "Build meals Row",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [420, -200]
+      "position": [820, -200]
     },
     {
       "parameters": {
@@ -332,7 +356,9 @@
     "LINE Get Image Content": { "main": [ [ { "node": "Archive Image to Drive", "type": "main", "index": 0 } ] ] },
     "Archive Image to Drive": { "main": [ [ { "node": "Build Gemini Prompt", "type": "main", "index": 0 } ] ] },
     "Build Gemini Prompt": { "main": [ [ { "node": "Gemini — Estimate Macros", "type": "main", "index": 0 } ] ] },
-    "Gemini — Estimate Macros": { "main": [ [ { "node": "Build meals Row", "type": "main", "index": 0 } ] ] },
+    "Gemini — Estimate Macros": { "main": [ [ { "node": "Load Personal Food Table", "type": "main", "index": 0 } ] ] },
+    "Load Personal Food Table": { "main": [ [ { "node": "Aggregate Food Table", "type": "main", "index": 0 } ] ] },
+    "Aggregate Food Table": { "main": [ [ { "node": "Build meals Row", "type": "main", "index": 0 } ] ] },
     "Build meals Row": { "main": [ [ { "node": "Append meals Row", "type": "main", "index": 0 } ] ] },
     "Append meals Row": { "main": [ [ { "node": "LINE Reply — Confirm Card", "type": "main", "index": 0 } ] ] },
     "LINE Reply — Confirm Card": { "main": [ [ { "node": "Respond 200", "type": "main", "index": 0 } ] ] },
