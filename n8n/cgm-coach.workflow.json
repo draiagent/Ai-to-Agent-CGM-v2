@@ -2,7 +2,7 @@
   "name": "CGM Coach — Ingest (LINE → Gemini → Sheets)",
   "active": false,
   "settings": { "executionOrder": "v1", "timezone": "Asia/Taipei" },
-  "meta": { "note": "方案一骨架。匯入後需設定 3 個憑證與 4 個環境變數，見 n8n/README.md" },
+  "meta": { "note": "方案一骨架。匯入後需設定 2 個 Google 憑證與 6 個環境變數，見 n8n/README.md。LINE 只有單一 webhook URL：訊息與 postback（一鍵校正）都進 line-webhook，由 Route Event 分流。" },
   "pinData": {},
   "nodes": [
     {
@@ -16,49 +16,62 @@
       "name": "LINE Webhook",
       "type": "n8n-nodes-base.webhook",
       "typeVersion": 2,
-      "position": [-820, 0],
+      "position": [-1040, 0],
       "webhookId": "line-webhook"
     },
     {
       "parameters": {
-        "jsCode": "// 解析 LINE webhook event，決定 T0（伺服器收訊時間，Asia/Taipei）\nconst body = $input.first().json.body || $input.first().json;\nconst ev = (body.events && body.events[0]) || {};\nconst msg = ev.message || {};\nconst now = new Date(ev.timestamp || Date.now());\n// ISO8601 +08:00\nconst t0 = new Date(now.getTime() + 8 * 3600 * 1000).toISOString().replace('Z', '+08:00');\nreturn [{ json: {\n  reply_token: ev.replyToken || null,\n  source_user: (ev.source && ev.source.userId) || null,\n  message_type: msg.type || null,\n  message_id: msg.id || null,\n  text: msg.type === 'text' ? (msg.text || '') : '',\n  t0,\n  raw_event: ev\n} }];"
+        "jsCode": "// 解析 LINE webhook event（訊息或 postback），決定 T0（伺服器收訊時間，Asia/Taipei）\nconst body = $input.first().json.body || $input.first().json;\nconst ev = (body.events && body.events[0]) || {};\nconst msg = ev.message || {};\nconst pb = ev.postback || {};\nconst now = new Date(ev.timestamp || Date.now());\nconst t0 = new Date(now.getTime() + 8 * 3600 * 1000).toISOString().replace('Z', '+08:00');\nreturn [{ json: {\n  event_type: ev.type || null,          // 'message' | 'postback' | ...\n  reply_token: ev.replyToken || null,\n  source_user: (ev.source && ev.source.userId) || null,\n  message_type: msg.type || null,       // 'image' | 'text' | ...\n  message_id: msg.id || null,\n  text: msg.type === 'text' ? (msg.text || '') : '',\n  postback_data: pb.data || null,        // 例：action=half&meal_id=<encodeURIComponent>\n  t0,\n  raw_event: ev\n} }];\n// TODO: LINE 可在單一請求批次多個 events；此處只處理 events[0]。"
       },
       "id": "parse_event",
       "name": "Parse LINE Event",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-620, 0]
+      "position": [-840, 0]
     },
     {
       "parameters": {
-        "conditions": {
-          "options": { "caseSensitive": true, "typeValidation": "strict" },
-          "conditions": [
+        "rules": {
+          "values": [
             {
-              "leftValue": "={{ $json.message_type }}",
-              "rightValue": "image",
-              "operator": { "type": "string", "operation": "equals" }
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.event_type }}", "rightValue": "postback", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "postback"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.message_type }}", "rightValue": "image", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "image"
             }
-          ],
-          "combinator": "and"
+          ]
         },
-        "options": {}
+        "options": { "fallbackOutput": "extra", "renameFallbackOutput": "other" }
       },
-      "id": "is_image",
-      "name": "Is Image?",
-      "type": "n8n-nodes-base.if",
-      "typeVersion": 2,
-      "position": [-420, 0]
+      "id": "route_event",
+      "name": "Route Event",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [-640, 0]
     },
+
     {
       "parameters": {
         "url": "=https://api-data.line.me/v2/bot/message/{{ $json.message_id }}/content",
-        "authentication": "none",
         "sendHeaders": true,
         "headerParameters": {
-          "parameters": [
-            { "name": "Authorization", "value": "=Bearer {{ $env.LINE_CHANNEL_ACCESS_TOKEN }}" }
-          ]
+          "parameters": [ { "name": "Authorization", "value": "=Bearer {{ $env.LINE_CHANNEL_ACCESS_TOKEN }}" } ]
         },
         "options": { "response": { "response": { "responseFormat": "file" } } }
       },
@@ -66,7 +79,7 @@
       "name": "LINE Get Image Content",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [-220, -100]
+      "position": [-420, -200]
     },
     {
       "parameters": {
@@ -79,8 +92,18 @@
       "name": "Archive Image to Drive",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
-      "position": [-20, -100],
+      "position": [-220, -200],
       "credentials": { "googleDriveOAuth2Api": { "id": "REPLACE", "name": "Google Drive account" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 組 Gemini 提示與回應 schema（完整版見 n8n/gemini-prompt.md）\nconst p = $('Parse LINE Event').item.json;\nconst prompt = [\n  '你是營養估算助手。根據餐點照片與使用者備註，逐項列出食物、推估份量(克)與三大營養素。',\n  '規則：1) 每項給 portion_g 與 0-1 信心度；2) 不確定就給區間中點並降低信心度；3) 只輸出 JSON。',\n  '使用者備註：' + (p.text || '（無）')\n].join('\\n');\nconst schema = {\n  type: 'object',\n  properties: {\n    items: { type: 'array', items: { type: 'object', properties: {\n      name: { type: 'string' }, portion_g: { type: 'number' }, portion_confidence: { type: 'number' },\n      carb_g: { type: 'number' }, net_carb_g: { type: 'number' }, protein_g: { type: 'number' },\n      fat_g: { type: 'number' }, fiber_g: { type: 'number' }\n    }, required: ['name','portion_g','carb_g','protein_g','fat_g'] } },\n    totals: { type: 'object', properties: {\n      carb_g: { type: 'number' }, net_carb_g: { type: 'number' }, protein_g: { type: 'number' },\n      fat_g: { type: 'number' }, fiber_g: { type: 'number' } } },\n    gi_est: { type: 'number' }, gl_est: { type: 'number' }, gi_confidence: { type: 'number' },\n    eating_order: { type: 'string', enum: ['veg_first','carb_first','mixed','unknown'] },\n    post_meal_activity: { type: 'string', enum: ['none','walk_10_15min','walk_30min+','unknown'] }\n  },\n  required: ['items','totals']\n};\nreturn [{ json: { prompt, schema } }];"
+      },
+      "id": "build_prompt",
+      "name": "Build Gemini Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-20, -200]
     },
     {
       "parameters": {
@@ -90,34 +113,24 @@
         "headerParameters": { "parameters": [ { "name": "Content-Type", "value": "application/json" } ] },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  contents: [{\n    role: 'user',\n    parts: [\n      { text: $('Build Gemini Prompt').item.json.prompt },\n      { inline_data: { mime_type: 'image/jpeg', data: $binary.data.data } }\n    ]\n  }],\n  generationConfig: {\n    temperature: 0.2,\n    responseMimeType: 'application/json',\n    responseSchema: $('Build Gemini Prompt').item.json.schema\n  }\n}) }}",
+        "jsonBody": "={{ JSON.stringify({\n  contents: [{ role: 'user', parts: [\n    { text: $('Build Gemini Prompt').item.json.prompt },\n    { inline_data: { mime_type: 'image/jpeg', data: $binary.data.data } }\n  ] }],\n  generationConfig: { temperature: 0.2, responseMimeType: 'application/json', responseSchema: $('Build Gemini Prompt').item.json.schema }\n}) }}",
         "options": {}
       },
       "id": "gemini",
       "name": "Gemini — Estimate Macros",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [380, -100]
+      "position": [200, -200]
     },
     {
       "parameters": {
-        "jsCode": "// 組 Gemini 提示與回應 schema（完整版見 n8n/gemini-prompt.md）\nconst p = $('Parse LINE Event').item.json;\nconst prompt = [\n  '你是營養估算助手。根據餐點照片與使用者備註，逐項列出食物、推估份量(克)與三大營養素。',\n  '規則：1) 每項給 assumed portion_g 與 0-1 信心度；2) 不確定就給區間中點並降低信心度；',\n  '3) 只輸出 JSON，不要解釋。',\n  '使用者備註：' + (p.text || '（無）')\n].join('\\n');\nconst schema = {\n  type: 'object',\n  properties: {\n    items: { type: 'array', items: { type: 'object', properties: {\n      name: { type: 'string' }, portion_g: { type: 'number' }, portion_confidence: { type: 'number' },\n      carb_g: { type: 'number' }, net_carb_g: { type: 'number' }, protein_g: { type: 'number' },\n      fat_g: { type: 'number' }, fiber_g: { type: 'number' }\n    }, required: ['name','portion_g','carb_g','protein_g','fat_g'] } },\n    totals: { type: 'object', properties: {\n      carb_g: { type: 'number' }, net_carb_g: { type: 'number' }, protein_g: { type: 'number' },\n      fat_g: { type: 'number' }, fiber_g: { type: 'number' } } },\n    gi_est: { type: 'number' }, gl_est: { type: 'number' }, gi_confidence: { type: 'number' },\n    eating_order: { type: 'string', enum: ['veg_first','carb_first','mixed','unknown'] },\n    post_meal_activity: { type: 'string', enum: ['none','walk_10_15min','walk_30min+','unknown'] }\n  },\n  required: ['items','totals']\n};\nreturn [{ json: { prompt, schema } }];"
-      },
-      "id": "build_prompt",
-      "name": "Build Gemini Prompt",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [180, -100]
-    },
-    {
-      "parameters": {
-        "jsCode": "// 解析 Gemini 回應 → 套用個人常吃食物表覆蓋總碳水 → 組 meals 列\nconst p = $('Parse LINE Event').item.json;\nconst resp = $input.first().json;\nlet est = {};\ntry {\n  est = JSON.parse(resp.candidates[0].content.parts[0].text);\n} catch (e) {\n  est = { items: [], totals: {}, _parse_error: String(e) };\n}\n\n// TODO: 從 Google Sheets 讀 personal_food_table，對 est.items[].name 做碳水覆蓋\n// const table = $('Load Personal Food Table').all(); ...\nconst PERSONAL_TABLE = {}; // { '白飯(半碗)': { carb_per_100g: 37 }, ... }\n\nfunction round1(x) { return x == null ? null : Math.round(x * 10) / 10; }\nconst totals = est.totals || {};\nconst confidences = (est.items || []).map(i => i.portion_confidence).filter(x => typeof x === 'number');\nconst confidence = confidences.length ? round1(confidences.reduce((a,b)=>a+b,0)/confidences.length) : 0.4;\n\nreturn [{ json: {\n  meal_id: p.t0,\n  t0: p.t0,\n  note: p.text || '',\n  items_json: JSON.stringify(est.items || []),\n  carb_g: round1(totals.carb_g),\n  net_carb_g: round1(totals.net_carb_g ?? totals.carb_g),\n  protein_g: round1(totals.protein_g),\n  fat_g: round1(totals.fat_g),\n  fiber_g: round1(totals.fiber_g),\n  gi_est: round1(est.gi_est),\n  gl_est: round1(est.gl_est),\n  eating_order: est.eating_order || 'unknown',\n  post_meal_activity: est.post_meal_activity || 'unknown',\n  confidence,\n  user_confirmed: false,\n  image_url: ($('Archive Image to Drive').item.json.webViewLink) || '',\n  source_user: p.source_user\n} }];"
+        "jsCode": "// 解析 Gemini 回應 → 套用個人常吃食物表覆蓋總碳水 → 組 meals 列\nconst p = $('Parse LINE Event').item.json;\nconst resp = $input.first().json;\nlet est = {};\ntry { est = JSON.parse(resp.candidates[0].content.parts[0].text); }\ncatch (e) { est = { items: [], totals: {}, _parse_error: String(e) }; }\n\n// TODO: 讀 Google Sheets 的 personal_food_table，對 est.items[].name 做碳水覆蓋\nconst PERSONAL_TABLE = {};\n\nfunction r1(x) { return x == null ? null : Math.round(x * 10) / 10; }\nconst totals = est.totals || {};\nconst confs = (est.items || []).map(i => i.portion_confidence).filter(x => typeof x === 'number');\nconst confidence = confs.length ? r1(confs.reduce((a, b) => a + b, 0) / confs.length) : 0.4;\n\nreturn [{ json: {\n  meal_id: p.t0,\n  t0: p.t0,\n  note: p.text || '',\n  items_json: JSON.stringify(est.items || []),\n  carb_g: r1(totals.carb_g),\n  net_carb_g: r1(totals.net_carb_g ?? totals.carb_g),\n  protein_g: r1(totals.protein_g),\n  fat_g: r1(totals.fat_g),\n  fiber_g: r1(totals.fiber_g),\n  gi_est: r1(est.gi_est),\n  gl_est: r1(est.gl_est),\n  eating_order: est.eating_order || 'unknown',\n  post_meal_activity: est.post_meal_activity || 'unknown',\n  confidence,\n  user_confirmed: false,\n  image_url: ($('Archive Image to Drive').item.json.webViewLink) || '',\n  source_user: p.source_user\n} }];"
       },
       "id": "build_row",
       "name": "Build meals Row",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [580, -100]
+      "position": [420, -200]
     },
     {
       "parameters": {
@@ -131,7 +144,7 @@
       "name": "Append meals Row",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.5,
-      "position": [780, -100],
+      "position": [640, -200],
       "credentials": { "googleSheetsOAuth2Api": { "id": "REPLACE", "name": "Google Sheets account" } }
     },
     {
@@ -147,14 +160,96 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({\n  replyToken: $('Parse LINE Event').item.json.reply_token,\n  messages: [{\n    type: 'text',\n    text: '已記錄：總碳水約 ' + ($json.carb_g ?? '?') + ' g（信心 ' + $json.confidence + '）\\n這份估算對嗎？',\n    quickReply: { items: [\n      { type: 'action', action: { type: 'postback', label: '✅ 正確', data: 'confirm=ok&meal_id=' + $json.meal_id } },\n      { type: 'action', action: { type: 'postback', label: '✏️ 份量減半', data: 'confirm=half&meal_id=' + $json.meal_id } },\n      { type: 'action', action: { type: 'postback', label: '✏️ 份量加倍', data: 'confirm=double&meal_id=' + $json.meal_id } }\n    ] }\n  }]\n}) }}",
+        "jsonBody": "={{ JSON.stringify({\n  replyToken: $('Parse LINE Event').item.json.reply_token,\n  messages: [{\n    type: 'text',\n    text: '已記錄：總碳水約 ' + ($json.carb_g ?? '?') + ' g（信心 ' + $json.confidence + '）\\n這份估算對嗎？',\n    quickReply: { items: [\n      { type: 'action', action: { type: 'postback', label: '✅ 正確', data: 'action=ok&meal_id=' + encodeURIComponent($json.meal_id), displayText: '正確' } },\n      { type: 'action', action: { type: 'postback', label: '✏️ 份量減半', data: 'action=half&meal_id=' + encodeURIComponent($json.meal_id), displayText: '份量減半' } },\n      { type: 'action', action: { type: 'postback', label: '✏️ 份量加倍', data: 'action=double&meal_id=' + encodeURIComponent($json.meal_id), displayText: '份量加倍' } }\n    ] }\n  }]\n}) }}",
         "options": {}
       },
       "id": "line_reply",
       "name": "LINE Reply — Confirm Card",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [980, -100]
+      "position": [860, -200]
+    },
+
+    {
+      "parameters": {
+        "jsCode": "// 解析一鍵校正 postback：action=ok|half|double & meal_id=<encodeURIComponent>\nconst ev = $('Parse LINE Event').item.json;\nconst params = new URLSearchParams(ev.postback_data || '');\nreturn [{ json: {\n  action: params.get('action'),\n  meal_id: params.get('meal_id')\n} }];"
+      },
+      "id": "parse_postback",
+      "name": "Parse Postback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-420, 120]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": { "__rl": true, "mode": "id", "value": "={{ $env.SHEET_ID }}" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "meals" },
+        "filtersUI": { "values": [ { "lookupColumn": "meal_id", "lookupValue": "={{ $json.meal_id }}" } ] },
+        "options": {}
+      },
+      "id": "sheets_read_meal",
+      "name": "Read meals Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [-200, 120],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "REPLACE", "name": "Google Sheets account" } }
+    },
+    {
+      "parameters": {
+        "jsCode": "// 依 action 回寫：ok → 只設 user_confirmed；half/double → 依比例縮放份量相關欄位\nconst action = $('Parse Postback').item.json.action;\nconst mealId = $('Parse Postback').item.json.meal_id;\nconst row = $json;  // Read meals Row 的匹配列\n\nif (!row || !row.meal_id) {\n  return [{ json: { meal_id: mealId, _not_found: true } }];\n}\n\nconst factor = action === 'half' ? 0.5 : action === 'double' ? 2 : 1;\nfunction scale(v) {\n  const n = parseFloat(v);\n  return Number.isFinite(n) ? Math.round(n * factor * 10) / 10 : v;\n}\n\nconst out = { meal_id: row.meal_id, user_confirmed: true };\n\nif (factor !== 1) {\n  let items = [];\n  try { items = JSON.parse(row.items_json || '[]'); } catch (e) {}\n  items = items.map(it => ({\n    ...it,\n    portion_g: scale(it.portion_g), carb_g: scale(it.carb_g), net_carb_g: scale(it.net_carb_g),\n    protein_g: scale(it.protein_g), fat_g: scale(it.fat_g), fiber_g: scale(it.fiber_g)\n  }));\n  out.items_json = JSON.stringify(items);\n  out.carb_g = scale(row.carb_g);\n  out.net_carb_g = scale(row.net_carb_g);\n  out.protein_g = scale(row.protein_g);\n  out.fat_g = scale(row.fat_g);\n  out.fiber_g = scale(row.fiber_g);\n  out.gl_est = scale(row.gl_est);   // GL 隨碳水縮放；GI 為強度性質不變\n}\nreturn [{ json: out }];"
+      },
+      "id": "compute_correction",
+      "name": "Compute Correction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [20, 120]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": { "__rl": true, "mode": "id", "value": "={{ $env.SHEET_ID }}" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "meals" },
+        "columns": { "mappingMode": "autoMapInputData", "matchingColumns": ["meal_id"], "value": {} },
+        "options": {}
+      },
+      "id": "sheets_update_meal",
+      "name": "Update meals Row",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [240, 120],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "REPLACE", "name": "Google Sheets account" } }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.line.me/v2/bot/message/reply",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" },
+            { "name": "Authorization", "value": "=Bearer {{ $env.LINE_CHANNEL_ACCESS_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (() => {\n  const action = $('Parse Postback').item.json.action;\n  const c = $('Compute Correction').item.json;\n  let text;\n  if (c && c._not_found) text = '找不到該筆紀錄，請重拍一次 🙏';\n  else if (action === 'ok') text = '已確認這份估算 ✅';\n  else if (action === 'half') text = '已調整為半份，總碳水約 ' + c.carb_g + ' g ✅';\n  else if (action === 'double') text = '已調整為雙份，總碳水約 ' + c.carb_g + ' g ✅';\n  else text = '已更新 ✅';\n  return JSON.stringify({ replyToken: $('Parse LINE Event').item.json.reply_token, messages: [{ type: 'text', text }] });\n})() }}",
+        "options": {}
+      },
+      "id": "line_reply_correction",
+      "name": "LINE Reply — Correction Done",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 120]
+    },
+
+    {
+      "parameters": { "jsCode": "// 非圖片、非 postback：回覆使用說明並結束\nreturn [{ json: { skip: true } }];" },
+      "id": "noop_other",
+      "name": "Other → skip",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-420, 300]
     },
     {
       "parameters": { "respondWith": "text", "responseBody": "OK", "options": {} },
@@ -162,25 +257,16 @@
       "name": "Respond 200",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1,
-      "position": [1180, 0]
+      "position": [1080, -60]
     },
+
     {
-      "parameters": { "jsCode": "// 非圖片訊息：回覆使用說明並結束\nreturn [{ json: { skip: true } }];" },
-      "id": "noop_non_image",
-      "name": "Non-image → skip",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [-220, 140]
-    },
-    {
-      "parameters": {
-        "rule": { "interval": [ { "field": "cronExpression", "expression": "0 30 1 * * *" } ] }
-      },
+      "parameters": { "rule": { "interval": [ { "field": "cronExpression", "expression": "0 30 1 * * *" } ] } },
       "id": "cgm_schedule",
       "name": "CGM CSV — Daily 01:30",
       "type": "n8n-nodes-base.scheduleTrigger",
       "typeVersion": 1.2,
-      "position": [-820, 420]
+      "position": [-1040, 460]
     },
     {
       "parameters": {
@@ -194,7 +280,7 @@
       "name": "List CGM CSV Files",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
-      "position": [-620, 420],
+      "position": [-820, 460],
       "credentials": { "googleDriveOAuth2Api": { "id": "REPLACE", "name": "Google Drive account" } }
     },
     {
@@ -203,18 +289,18 @@
       "name": "Download CSV",
       "type": "n8n-nodes-base.googleDrive",
       "typeVersion": 3,
-      "position": [-420, 420],
+      "position": [-600, 460],
       "credentials": { "googleDriveOAuth2Api": { "id": "REPLACE", "name": "Google Drive account" } }
     },
     {
       "parameters": {
-        "jsCode": "// 解析 LibreView 匯出 CSV → cgm 列（時區正規化 Asia/Taipei，去重）\n// 完整解析邏輯與 engine/cgm_coach/libre.py 一致；此處為 n8n 端輕量版。\nconst csv = Buffer.from($binary.data.data, 'base64').toString('utf8');\nconst lines = csv.split(/\\r?\\n/).filter(Boolean);\n// LibreView：第 1 行為報表標題，第 2 行為欄位名\nconst header = lines[1].split(',').map(s => s.replace(/^\"|\"$/g, '').trim());\nconst idx = (name) => header.indexOf(name);\nconst iTs = idx('Device Timestamp');\nconst iHist = idx('Historic Glucose mg/dL');\nconst iScan = idx('Scan Glucose mg/dL');\nconst iSerial = idx('Serial Number');\nconst out = [];\nconst seen = new Set();\nfor (let r = 2; r < lines.length; r++) {\n  const cols = lines[r].split(',').map(s => s.replace(/^\"|\"$/g, '').trim());\n  const g = cols[iHist] || cols[iScan];\n  if (!g) continue;\n  // TODO: 依匯出地區設定 dayfirst；此處假設 MM-DD-YYYY HH:MM\n  const ts = new Date(cols[iTs]);\n  if (isNaN(ts)) continue;\n  const iso = new Date(ts.getTime() + 8 * 3600 * 1000).toISOString().replace('Z', '+08:00');\n  const session = cols[iSerial] || 'unknown';\n  const key = iso + '|' + session;\n  if (seen.has(key)) continue;\n  seen.add(key);\n  out.push({ json: { ts: iso, glucose_mgdl: Number(g), sensor_session: session, source: 'libre' } });\n}\nreturn out;"
+        "jsCode": "// 解析 LibreView 匯出 CSV → cgm 列（時區正規化 Asia/Taipei，去重）\n// 與 engine/cgm_coach/libre.py 邏輯一致；此為 n8n 端輕量版。\nconst csv = Buffer.from($binary.data.data, 'base64').toString('utf8');\nconst lines = csv.split(/\\r?\\n/).filter(Boolean);\nconst header = lines[1].split(',').map(s => s.replace(/^\"|\"$/g, '').trim());\nconst idx = (name) => header.indexOf(name);\nconst iTs = idx('Device Timestamp');\nconst iHist = idx('Historic Glucose mg/dL');\nconst iScan = idx('Scan Glucose mg/dL');\nconst iSerial = idx('Serial Number');\nconst out = [];\nconst seen = new Set();\nfor (let r = 2; r < lines.length; r++) {\n  const cols = lines[r].split(',').map(s => s.replace(/^\"|\"$/g, '').trim());\n  const g = cols[iHist] || cols[iScan];\n  if (!g) continue;\n  // TODO: 依匯出地區設定 dayfirst；此處假設 MM-DD-YYYY HH:MM\n  const ts = new Date(cols[iTs]);\n  if (isNaN(ts)) continue;\n  const iso = new Date(ts.getTime() + 8 * 3600 * 1000).toISOString().replace('Z', '+08:00');\n  const session = cols[iSerial] || 'unknown';\n  const key = iso + '|' + session;\n  if (seen.has(key)) continue;\n  seen.add(key);\n  out.push({ json: { ts: iso, glucose_mgdl: Number(g), sensor_session: session, source: 'libre' } });\n}\nreturn out;"
       },
       "id": "parse_libre",
       "name": "Parse LibreView CSV",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [-220, 420]
+      "position": [-380, 460]
     },
     {
       "parameters": {
@@ -228,19 +314,21 @@
       "name": "Append cgm Rows",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.5,
-      "position": [-20, 420],
+      "position": [-160, 460],
       "credentials": { "googleSheetsOAuth2Api": { "id": "REPLACE", "name": "Google Sheets account" } }
     }
   ],
   "connections": {
     "LINE Webhook": { "main": [ [ { "node": "Parse LINE Event", "type": "main", "index": 0 } ] ] },
-    "Parse LINE Event": { "main": [ [ { "node": "Is Image?", "type": "main", "index": 0 } ] ] },
-    "Is Image?": {
+    "Parse LINE Event": { "main": [ [ { "node": "Route Event", "type": "main", "index": 0 } ] ] },
+    "Route Event": {
       "main": [
+        [ { "node": "Parse Postback", "type": "main", "index": 0 } ],
         [ { "node": "LINE Get Image Content", "type": "main", "index": 0 } ],
-        [ { "node": "Non-image → skip", "type": "main", "index": 0 } ]
+        [ { "node": "Other → skip", "type": "main", "index": 0 } ]
       ]
     },
+
     "LINE Get Image Content": { "main": [ [ { "node": "Archive Image to Drive", "type": "main", "index": 0 } ] ] },
     "Archive Image to Drive": { "main": [ [ { "node": "Build Gemini Prompt", "type": "main", "index": 0 } ] ] },
     "Build Gemini Prompt": { "main": [ [ { "node": "Gemini — Estimate Macros", "type": "main", "index": 0 } ] ] },
@@ -248,7 +336,15 @@
     "Build meals Row": { "main": [ [ { "node": "Append meals Row", "type": "main", "index": 0 } ] ] },
     "Append meals Row": { "main": [ [ { "node": "LINE Reply — Confirm Card", "type": "main", "index": 0 } ] ] },
     "LINE Reply — Confirm Card": { "main": [ [ { "node": "Respond 200", "type": "main", "index": 0 } ] ] },
-    "Non-image → skip": { "main": [ [ { "node": "Respond 200", "type": "main", "index": 0 } ] ] },
+
+    "Parse Postback": { "main": [ [ { "node": "Read meals Row", "type": "main", "index": 0 } ] ] },
+    "Read meals Row": { "main": [ [ { "node": "Compute Correction", "type": "main", "index": 0 } ] ] },
+    "Compute Correction": { "main": [ [ { "node": "Update meals Row", "type": "main", "index": 0 } ] ] },
+    "Update meals Row": { "main": [ [ { "node": "LINE Reply — Correction Done", "type": "main", "index": 0 } ] ] },
+    "LINE Reply — Correction Done": { "main": [ [ { "node": "Respond 200", "type": "main", "index": 0 } ] ] },
+
+    "Other → skip": { "main": [ [ { "node": "Respond 200", "type": "main", "index": 0 } ] ] },
+
     "CGM CSV — Daily 01:30": { "main": [ [ { "node": "List CGM CSV Files", "type": "main", "index": 0 } ] ] },
     "List CGM CSV Files": { "main": [ [ { "node": "Download CSV", "type": "main", "index": 0 } ] ] },
     "Download CSV": { "main": [ [ { "node": "Parse LibreView CSV", "type": "main", "index": 0 } ] ] },
